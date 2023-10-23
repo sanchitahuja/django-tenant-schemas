@@ -1,7 +1,10 @@
 from contextlib import contextmanager
+from datetime import timedelta, datetime
 
 from django.conf import settings
-from django.db import connection
+from django.db import connection, connections
+
+DEFAULT_DB = "default"
 
 try:
     from django.apps import apps, AppConfig
@@ -16,26 +19,32 @@ from django.core import mail
 def schema_context(schema_name):
     previous_tenant = connection.tenant
     try:
-        connection.set_schema(schema_name)
+        for conn in connections:
+            connections[conn].set_schema(schema_name)
         yield
     finally:
         if previous_tenant is None:
-            connection.set_schema_to_public()
+            for conn in connections:
+                connections[conn].set_schema_to_public()
         else:
-            connection.set_tenant(previous_tenant)
+            for conn in connections:
+                connections[conn].set_tenant(previous_tenant)
 
 
 @contextmanager
 def tenant_context(tenant):
     previous_tenant = connection.tenant
     try:
-        connection.set_tenant(tenant)
+        for conn in connections:
+            connections[conn].set_tenant(tenant)
         yield
     finally:
         if previous_tenant is None:
-            connection.set_schema_to_public()
+            for conn in connections:
+                connections[conn].set_schema_to_public()
         else:
-            connection.set_tenant(previous_tenant)
+            for conn in connections:
+                connections[conn].set_tenant(previous_tenant)
 
 
 def get_tenant_model():
@@ -89,7 +98,9 @@ def django_is_in_test_mode():
 
 
 def schema_exists(schema_name):
-    cursor = connection.cursor()
+    db = SchemaRouter.get_tenant_db(schema_name)
+    print("SchemaRouter schema_exists", db)
+    cursor = connections[db].cursor()
 
     # check if this schema already exists in the db
     sql = 'SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE LOWER(nspname) = LOWER(%s))'
@@ -116,3 +127,43 @@ def app_labels(apps_list):
     if AppConfig is None:
         return [app.split('.')[-1] for app in apps_list]
     return [AppConfig.create(app).label for app in apps_list]
+
+
+class SchemaRouter:
+    SYNC_DELAY = timedelta(minutes=10)
+    TENANT_MAP = None
+    _instance = None
+    LAST_SYNC = datetime.now()
+
+    @classmethod
+    def get_tenant_mapping(cls):
+        tenant_model = get_tenant_model()
+        if cls.TENANT_MAP is None or datetime.now() >= cls.LAST_SYNC + cls.SYNC_DELAY:
+            print("Reinitialized TENANT_MAP", cls.TENANT_MAP)
+            cls.TENANT_MAP = tenant_model.objects.values("schema_name", "database")
+            cls.LAST_SYNC = datetime.now()
+        return cls.TENANT_MAP
+
+    @classmethod
+    def get_tenant_db(cls, schema_name):
+        mapping = cls.get_tenant_mapping()
+        for m in mapping:
+            if schema_name == m["schema_name"]:
+                return m["database"]
+        return DEFAULT_DB
+
+    @classmethod
+    def get_tenant_connection(cls, schema_name):
+        tenant_db = cls.get_tenant_db(schema_name)
+        return connections[tenant_db]
+
+    @classmethod
+    def get_db_based_on_model(cls, schema_name, model=None):
+        if schema_name == get_public_schema_name():
+            output = DEFAULT_DB
+        elif model and model._meta.app_label in app_labels(settings.SHARED_APPS):
+            output = DEFAULT_DB
+        else:
+            output = SchemaRouter.get_tenant_db(schema_name)
+        # print("Model", model, "output", output, "connection.schema_name", connection.schema_name)
+        return output

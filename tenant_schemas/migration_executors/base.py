@@ -9,7 +9,7 @@ from tenant_schemas.utils import get_public_schema_name
 def run_migrations(args, options, executor_codename, schema_name, allow_atomic=True):
     from django.core.management import color
     from django.core.management.base import OutputWrapper
-    from django.db import connection
+    from django.db import connections
 
     style = color.color_style()
 
@@ -27,13 +27,17 @@ def run_migrations(args, options, executor_codename, schema_name, allow_atomic=T
     if int(options.get('verbosity', 1)) >= 1:
         stdout.write(style.NOTICE("=== Running migrate for schema %s" % schema_name))
 
-    connection.set_schema(schema_name)
+    if schema_name != get_public_schema_name():
+        for conn in connections:
+            connections[conn].set_schema(schema_name)
     MigrateCommand(stdout=stdout, stderr=stderr).execute(*args, **options)
 
     try:
-        transaction.commit()
-        connection.close()
-        connection.connection = None
+        print("Transaction using ", options.get("database"))
+        transaction.commit(using=options.get("database"))
+        for conn in connections:
+            connections[conn].close()
+            connections[conn].connection = None
     except transaction.TransactionManagementError:
         if not allow_atomic:
             raise
@@ -41,7 +45,9 @@ def run_migrations(args, options, executor_codename, schema_name, allow_atomic=T
         # We are in atomic transaction, don't close connections
         pass
 
-    connection.set_schema_to_public()
+    for conn in connections:
+        connections[conn].set_schema_to_public()
+
 
 
 class MigrationExecutor(object):

@@ -1,9 +1,9 @@
 from django.core.management import call_command
-from django.db import connection, models
+from django.db import connection, connections, models
 
 from tenant_schemas.postgresql_backend.base import _check_schema_name
 from tenant_schemas.signals import post_schema_sync
-from tenant_schemas.utils import get_public_schema_name, schema_exists
+from tenant_schemas.utils import get_public_schema_name, schema_exists, SchemaRouter
 
 
 class TenantQueryset(models.QuerySet):
@@ -48,6 +48,7 @@ class TenantMixin(models.Model):
     domain_url = models.CharField(max_length=128, unique=True)
     schema_name = models.CharField(max_length=63, unique=True,
                                    validators=[_check_schema_name])
+    database = models.CharField(max_length=63, default="default")
     objects = TenantQueryset.as_manager()
 
     class Meta:
@@ -68,7 +69,7 @@ class TenantMixin(models.Model):
 
         if is_new and self.auto_create_schema:
             try:
-                self.create_schema(check_if_exists=True, verbosity=verbosity)
+                self.create_schema(check_if_exists=True, verbosity=verbosity, database=self.database)
             except:
                 # We failed creating the tenant, delete what we created and
                 # re-raise the exception
@@ -88,13 +89,14 @@ class TenantMixin(models.Model):
                             % connection.schema_name)
 
         if schema_exists(self.schema_name) and (self.auto_drop_schema or force_drop):
-            cursor = connection.cursor()
-            cursor.execute('DROP SCHEMA IF EXISTS %s CASCADE' % self.schema_name)
+            db_connection = SchemaRouter.get_tenant_connection(self.schema_name)
+            with db_connection.cursor() as cursor:
+                cursor.execute('DROP SCHEMA IF EXISTS %s CASCADE' % self.schema_name)
 
         return super(TenantMixin, self).delete(*args, **kwargs)
 
     def create_schema(self, check_if_exists=False, sync_schema=True,
-                      verbosity=1):
+                      verbosity=1, database=None):
         """
         Creates the schema 'schema_name' for this tenant. Optionally checks if
         the schema already exists before creating it. Returns true if the
@@ -103,7 +105,10 @@ class TenantMixin(models.Model):
 
         # safety check
         _check_schema_name(self.schema_name)
-        cursor = connection.cursor()
+        if database:
+            cursor = connections[database].cursor()
+        else:
+            cursor = connection.cursor()
 
         if check_if_exists and schema_exists(self.schema_name):
             return False
@@ -112,9 +117,16 @@ class TenantMixin(models.Model):
         cursor.execute('CREATE SCHEMA %s' % self.schema_name)
 
         if sync_schema:
-            call_command('migrate_schemas',
-                         schema_name=self.schema_name,
-                         interactive=False,
-                         verbosity=verbosity)
-
-        connection.set_schema_to_public()
+            if database:
+                call_command('migrate_schemas',
+                             schema_name=self.schema_name,
+                             interactive=False,
+                             verbosity=verbosity,
+                             database=database)
+            else:
+                call_command('migrate_schemas',
+                             schema_name=self.schema_name,
+                             interactive=False,
+                             verbosity=verbosity)
+        for conn in connections:
+            connections[conn].set_schema_to_public()

@@ -14,10 +14,11 @@ class ParallelExecutor(MigrationExecutor):
             processes = getattr(settings, 'TENANT_PARALLEL_MIGRATION_MAX_PROCESSES', 2)
             chunks = getattr(settings, 'TENANT_PARALLEL_MIGRATION_CHUNKS', 2)
 
-            from django.db import connection
+            from django.db import connections
 
-            connection.close()
-            connection.connection = None
+            for conn in connections:
+                connections[conn].close()
+                connections[conn].connection = None
 
             run_migrations_p = functools.partial(
                 run_migrations,

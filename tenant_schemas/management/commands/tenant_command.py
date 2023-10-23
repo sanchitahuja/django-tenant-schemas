@@ -1,6 +1,6 @@
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
-from django.db import connection
+from django.db import connections
 from tenant_schemas.management.commands import InteractiveTenantOption
 
 
@@ -12,5 +12,6 @@ class Command(InteractiveTenantOption, BaseCommand):
         tenant = self.get_tenant_from_options_or_interactive(
             schema_name=schema_name, **options
         )
-        connection.set_tenant(tenant)
+        for conn in connections:
+            connections[conn].set_tenant(tenant)
         call_command(command, *args, **options)
